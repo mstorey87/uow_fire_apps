@@ -1,0 +1,642 @@
+---
+title: "How the Prediction App Generates ROS Predictions"
+subtitle: "Step-by-step walkthrough of `app.R` — lookup-table approach"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(tidyr)
+library(glue)
+library(scales)
+```
+
+---
+
+# Overview
+
+The prediction app (`app.R`) generates Bayesian quantile regression predictions for
+wildfire rate of spread (ROS) without loading the brms model objects at runtime.
+Instead, it reads a **precomputed lookup table** (`prediction_lookup.rds`) that stores
+the model's posterior draws in a grid-indexed form. Predictions are reconstructed by
+interpolating off those grids and summing terms — equivalent to calling
+`posterior_linpred()` on the fitted model, but orders of magnitude faster.
+
+This document walks through each step of that process.
+
+---
+
+# 1. The Bayesian model structure
+
+The underlying model is a Bayesian quantile regression fitted with `brms`, using the
+asymmetric Laplace family at quantiles q = 0.5 (median) and q = 0.9 (90th percentile):
+
+```
+ros ~ 0 + pyroregion +
+      t2(wind, fmi_surface, k = 5) +
+      s(sm_top, k = 5) +
+      s(lapse, k = 8) +
+      s(wbtsdslope_mean, k = 5) +
+      (1 | fire_day_id)
+```
+
+The formula is **additive**: the linear predictor is a sum of separate terms.
+This is the property the lookup-table approach exploits — each term can be
+precomputed independently, then added together at prediction time.
+
+The random effect `(1 | fire_day_id)` captures day-to-day variation in fire behaviour
+not explained by the weather predictors. At prediction time it is **marginalised out**
+(i.e. set to zero, its expected value), which is what `re_formula = NA` does in
+`posterior_linpred()`.
+
+---
+
+# 2. Loading the lookup table
+
+```{r load-lookup}
+STAN_DIR <- "stan_models"   # set this to wherever prediction_lookup.rds lives
+
+lookup <- readRDS(file.path(STAN_DIR, "prediction_lookup.rds"))
+
+# The lookup is a named list with one element per quantile model
+names(lookup)
+```
+
+Each element (e.g. `lookup$fit_q50`) is itself a list containing the precomputed
+grids and matrices for that quantile model:
+
+```{r lookup-structure}
+str(lookup$fit_q50, max.level = 1)
+```
+
+Key components:
+
+| Component | What it stores |
+|---|---|
+| `pyro_mat` | Matrix [draws × pyroregion]: the intercept term per pyroregion |
+| `t2_arr` | 3-D array [draws × wind_grid × fmi_grid]: the wind × FMI interaction term |
+| `sm_top_mat` | Matrix [draws × sm_top_grid]: the soil moisture smooth term |
+| `lapse_mat` | Matrix [draws × lapse_grid]: the lapse rate smooth term |
+| `wbt_mat` | Matrix [draws × wbt_grid]: the terrain ruggedness smooth term |
+| `grid_wind` | Vector of wind values used as the t2 grid axis |
+| `grid_fmi` | Vector of FMI values used as the t2 grid axis |
+| `grid_sm_top` | Vector of sm_top values |
+| `grid_lapse` | Vector of lapse values |
+| `grid_wbt` | Vector of wbtsdslope_mean values |
+| `pyro_levels` | Character vector of pyroregion factor levels |
+| `var_stats` | List of min/median/max per predictor (used for slider bounds in the app) |
+
+```{r lookup-dims}
+lk <- lookup$fit_q50
+
+cat("Number of posterior draws:", nrow(lk$pyro_mat), "\n")
+cat("Pyroregions:", lk$pyro_levels, "\n")
+cat("Wind grid:  ", length(lk$grid_wind), "points from", round(min(lk$grid_wind), 1),
+    "to", round(max(lk$grid_wind), 1), "km/h\n")
+cat("FMI grid:   ", length(lk$grid_fmi), "points from", round(min(lk$grid_fmi), 1),
+    "to", round(max(lk$grid_fmi), 1), "\n")
+```
+
+---
+
+# 3. The FMI calculation
+
+The app accepts temperature and relative humidity as slider inputs, then converts
+them to the **Sharples Fuel Moisture Index (FMI)** automatically:
+
+```{r fmi}
+calc_fmi <- function(temp, rh) 10 - 0.25 * (temp - rh)
+
+# Example: 35°C, 15% RH
+calc_fmi(35, 15)
+```
+
+Lower FMI = hotter and drier conditions.
+The FMI slider in the app is auto-updated when temp or RH change, but can also be
+dragged manually to override.
+
+```{r fmi-surface, fig.height=4, fig.width=6}
+expand_grid(temp = seq(20, 45, by = 5), rh = seq(5, 40, by = 5)) %>%
+  mutate(fmi = calc_fmi(temp, rh)) %>%
+  ggplot(aes(temp, rh, fill = fmi)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
+                       midpoint = 5, name = "FMI") +
+  labs(title = "Sharples FMI across temperature and relative humidity",
+       x = "Temperature (°C)", y = "Relative humidity (%)") +
+  theme_bw()
+```
+
+---
+
+# 4. Interpolation helpers
+
+Because the lookup table stores values at discrete grid points, any input value
+between grid points must be **linearly interpolated**. There are two helpers:
+
+## 4a. 1-D interpolation (`interp1_draws`)
+
+Used for `sm_top`, `lapse`, and `wbtsdslope_mean` — each has its own 1-D grid.
+
+```{r interp1}
+interp1_draws <- function(grid, mat, x) {
+  # Clamp x to within the grid (no extrapolation beyond training range)
+  x  <- min(max(x, grid[1]), grid[length(grid)])
+  # Find the two neighbouring grid indices that bracket x
+  ih <- min(max(findInterval(x, grid, all.inside = TRUE) + 1, 2), length(grid))
+  il <- ih - 1
+  # Linear interpolation weight: w = how far x is between grid[il] and grid[ih]
+  w  <- (x - grid[il]) / (grid[ih] - grid[il])
+  # Apply the same weight to every row (posterior draw) of the matrix simultaneously
+  mat[, il] * (1 - w) + mat[, ih] * w
+}
+```
+
+The key point: `mat` has one row per posterior draw. The same interpolation weight
+`w` is applied across all draws at once, so the output is a vector of interpolated
+values — one per draw.
+
+## 4b. 2-D interpolation (`interp2_draws`)
+
+Used for the wind × FMI interaction term `t2(wind, fmi_surface)`, which is stored
+as a 3-D array [draws × wind_grid × fmi_grid]:
+
+```{r interp2}
+interp2_draws <- function(grid_x, grid_y, arr, x, y) {
+  # Clamp both inputs
+  x <- min(max(x, grid_x[1]), grid_x[length(grid_x)])
+  y <- min(max(y, grid_y[1]), grid_y[length(grid_y)])
+  # Bracket indices for x and y separately
+  ixh <- min(max(findInterval(x, grid_x, all.inside = TRUE) + 1, 2), length(grid_x)); ixl <- ixh - 1
+  iyh <- min(max(findInterval(y, grid_y, all.inside = TRUE) + 1, 2), length(grid_y)); iyl <- iyh - 1
+  # Weights
+  wx <- (x - grid_x[ixl]) / (grid_x[ixh] - grid_x[ixl])
+  wy <- (y - grid_y[iyl]) / (grid_y[iyh] - grid_y[iyl])
+  # Bilinear interpolation across the 4 surrounding grid corners, for all draws
+  (1 - wx) * (1 - wy) * arr[, ixl, iyl] + wx * (1 - wy) * arr[, ixh, iyl] +
+    (1 - wx) * wy       * arr[, ixl, iyh] + wx * wy       * arr[, ixh, iyh]
+}
+```
+
+Bilinear interpolation weights the four corners of the surrounding grid cell
+by how close the input point is to each corner, then sums the weighted draw values.
+
+---
+
+# 5. Reconstructing the linear predictor — `predict_draws()`
+
+The core prediction function adds all interpolated terms together:
+
+```{r predict-draws}
+predict_draws <- function(lk, pyroregion, wind, fmi_surface, sm_top, lapse, wbtsdslope_mean) {
+  lk$pyro_mat[, as.character(pyroregion)] +             # pyroregion intercept
+    interp2_draws(lk$grid_wind, lk$grid_fmi,             # wind × FMI interaction
+                  lk$t2_arr, wind, fmi_surface) +
+    interp1_draws(lk$grid_sm_top, lk$sm_top_mat, sm_top) +   # soil moisture smooth
+    interp1_draws(lk$grid_lapse,  lk$lapse_mat,  lapse) +    # lapse rate smooth
+    interp1_draws(lk$grid_wbt,    lk$wbt_mat,    wbtsdslope_mean)  # terrain smooth
+}
+```
+
+The result is a **vector of 200 values** — one per posterior draw. Each value is the
+model's predicted linear predictor (on the ROS scale, km/h) for those input conditions
+under one plausible set of model parameters drawn from the posterior distribution.
+
+This is mathematically equivalent to:
+```r
+posterior_linpred(fit, newdata = nd, ndraws = 200,
+                  re_formula = NA, allow_new_levels = TRUE)
+```
+... but without loading `brms` or Stan.
+
+---
+
+# 6. Step-by-step prediction example
+
+Define a set of weather conditions:
+
+```{r example-inputs}
+# --- Example weather inputs ---
+pyroregion_val  <- lk$pyro_levels[1]   # first pyroregion
+wind_val        <- 30                  # km/h
+temp_val        <- 35                  # °C
+rh_val          <- 15                  # %
+fmi_val         <- calc_fmi(temp_val, rh_val)   # = 10 - 0.25*(35-15) = 5.0
+sm_top_val      <- lk$var_stats$sm_top$median
+lapse_val       <- lk$var_stats$lapse$median
+wbt_val         <- lk$var_stats$wbtsdslope_mean$median
+
+cat(glue("pyroregion = {pyroregion_val}
+wind       = {wind_val} km/h
+temp       = {temp_val}°C,  RH = {rh_val}%  →  FMI = {fmi_val}
+sm_top     = {round(sm_top_val, 2)}  (median of training data)
+lapse      = {round(lapse_val, 2)}°C  (median)
+wbt        = {round(wbt_val, 2)}  (median)
+"))
+```
+
+## Step 6a. Get 200 posterior draws for each quantile model
+
+```{r get-draws}
+draws_q50 <- predict_draws(lookup$fit_q50, pyroregion_val, wind_val, fmi_val,
+                            sm_top_val, lapse_val, wbt_val)
+draws_q90 <- predict_draws(lookup$fit_q90, pyroregion_val, wind_val, fmi_val,
+                            sm_top_val, lapse_val, wbt_val)
+
+cat("q50 model draws: n =", length(draws_q50), "\n")
+cat("Range:", round(range(draws_q50), 3), "\n\n")
+cat("q90 model draws: n =", length(draws_q90), "\n")
+cat("Range:", round(range(draws_q90), 3), "\n")
+```
+
+## Step 6b. Summarise draws to point estimate + interval
+
+The app floors negative predictions at 0 (ROS cannot be negative):
+
+```{r summarise-draws}
+summarise_draws <- function(d, q_label) {
+  tibble(
+    label  = q_label,
+    median = max(median(d), 0),
+    lo     = max(quantile(d, 0.10), 0),
+    hi     = max(quantile(d, 0.90), 0),
+    pct_neg = round(mean(d < 0) * 100, 1)
+  )
+}
+
+pred_summary <- bind_rows(
+  summarise_draws(draws_q50, "Median ROS (q50)"),
+  summarise_draws(draws_q90, "Extreme ROS (q90)")
+)
+
+pred_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  knitr::kable(caption = "Predicted ROS summary",
+               col.names = c("Model", "Median (km/h)", "10th pctile", "90th pctile", "% draws < 0"))
+```
+
+The **median** of the draws is the point estimate. The **10th–90th percentile** of the
+draws gives the 80% credible interval — reflecting how much parameter uncertainty
+remains in the posterior.
+
+## Step 6c. Visualise the draws
+
+```{r draws-plot, fig.height=4, fig.width=7}
+bind_rows(
+  tibble(draws = draws_q50, model = "q50 — Median ROS"),
+  tibble(draws = draws_q90, model = "q90 — Extreme ROS")
+) %>%
+  ggplot(aes(x = draws, fill = model)) +
+  geom_histogram(bins = 40, alpha = 0.7, colour = "white") +
+  geom_vline(data = pred_summary,
+             aes(xintercept = median, colour = label),
+             linewidth = 1.2, linetype = "dashed") +
+  scale_fill_manual(values  = c("q50 — Median ROS" = "#2166ac", "q90 — Extreme ROS" = "#b2182b")) +
+  scale_colour_manual(values = c("Median ROS (q50)" = "#2166ac", "Extreme ROS (q90)" = "#b2182b"),
+                      guide = "none") +
+  facet_wrap(~model, ncol = 1) +
+  labs(title = "Posterior draws of the linear predictor",
+       subtitle = glue("wind = {wind_val} km/h, FMI = {fmi_val}, pyroregion = {pyroregion_val}"),
+       x = "Predicted ROS (km/h)", y = "Count", fill = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# 7. What each term contributes
+
+We can inspect the contribution of each additive term at these input values:
+
+```{r term-contributions}
+pyro_term  <- lk$pyro_mat[, as.character(pyroregion_val)]
+t2_term    <- interp2_draws(lk$grid_wind, lk$grid_fmi, lk$t2_arr, wind_val, fmi_val)
+sm_term    <- interp1_draws(lk$grid_sm_top, lk$sm_top_mat, sm_top_val)
+lapse_term <- interp1_draws(lk$grid_lapse, lk$lapse_mat, lapse_val)
+wbt_term   <- interp1_draws(lk$grid_wbt, lk$wbt_mat, wbt_val)
+
+term_summary <- tibble(
+  term        = c("pyroregion intercept", "t2(wind, fmi)", "s(sm_top)", "s(lapse)", "s(wbtsdslope)"),
+  mean_contribution = c(mean(pyro_term), mean(t2_term), mean(sm_term), mean(lapse_term), mean(wbt_term)),
+  sd          = c(sd(pyro_term), sd(t2_term), sd(sm_term), sd(lapse_term), sd(wbt_term))
+)
+
+term_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  knitr::kable(caption = "Mean contribution of each additive term (q50 model)",
+               col.names = c("Term", "Mean contribution (km/h)", "SD across draws"))
+```
+
+```{r term-bar, fig.height=3.5, fig.width=6}
+term_summary %>%
+  ggplot(aes(x = reorder(term, mean_contribution), y = mean_contribution,
+             fill = mean_contribution > 0)) +
+  geom_col() +
+  geom_errorbar(aes(ymin = mean_contribution - sd, ymax = mean_contribution + sd),
+                width = 0.25) +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "#2166ac", "FALSE" = "#b2182b"), guide = "none") +
+  labs(title = "Additive term contributions — q50 model",
+       subtitle = "Error bars = ±1 SD across 200 posterior draws",
+       x = NULL, y = "Contribution to predicted ROS (km/h)") +
+  theme_bw()
+```
+
+---
+
+# 8. The wind × FMI interaction surface
+
+The interaction term `t2(wind, fmi_surface)` captures how the effect of wind speed
+depends on fuel moisture conditions. We can visualise this by sweeping across both
+predictors:
+
+```{r t2-surface, fig.height=5, fig.width=7}
+grid_wind_seq <- seq(min(lk$grid_wind), max(lk$grid_wind), length.out = 40)
+grid_fmi_seq  <- seq(min(lk$grid_fmi),  max(lk$grid_fmi),  length.out = 30)
+
+t2_surface <- expand_grid(wind = grid_wind_seq, fmi = grid_fmi_seq) %>%
+  rowwise() %>%
+  mutate(t2_mean = mean(interp2_draws(lk$grid_wind, lk$grid_fmi, lk$t2_arr, wind, fmi))) %>%
+  ungroup()
+
+ggplot(t2_surface, aes(wind, fmi, fill = t2_mean)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#4575b4", mid = "#ffffbf", high = "#d73027",
+                       midpoint = 0, name = "t2 term\n(km/h)") +
+  labs(title = "Wind × FMI interaction surface (posterior mean, q50 model)",
+       subtitle = "This term captures how wind's effect on ROS depends on fuel moisture",
+       x = "Wind speed (km/h)", y = "FMI (Sharples)") +
+  theme_bw()
+```
+
+Key pattern: at low FMI (hot/dry), a given wind speed contributes more to ROS than the
+same wind speed at high FMI (cool/moist). Wind and moisture interact — not just add.
+
+---
+
+# 9. Sensitivity to each predictor
+
+The app's sidebar shows a single set of sliders, but we can examine how the prediction
+changes across the full range of each predictor, holding others at their median:
+
+```{r sensitivity, fig.height=6, fig.width=8}
+medians <- list(
+  wind        = lk$var_stats$wind$median,
+  fmi_surface = lk$var_stats$fmi_surface$median,
+  sm_top      = lk$var_stats$sm_top$median,
+  lapse       = lk$var_stats$lapse$median,
+  wbt         = lk$var_stats$wbtsdslope_mean$median,
+  pyroregion  = lk$pyro_levels[1]
+)
+
+make_sensitivity <- function(var_name, grid) {
+  map_dfr(grid, function(val) {
+    args <- medians
+    args[[var_name]] <- val
+    d <- predict_draws(lookup$fit_q50, args$pyroregion, args$wind, args$fmi_surface,
+                       args$sm_top, args$lapse, args$wbt)
+    tibble(
+      predictor = var_name,
+      value     = val,
+      median    = pmax(median(d), 0),
+      lo        = pmax(quantile(d, 0.10), 0),
+      hi        = pmax(quantile(d, 0.90), 0)
+    )
+  })
+}
+
+sens_dat <- bind_rows(
+  make_sensitivity("wind",        seq(min(lk$grid_wind), max(lk$grid_wind), length.out = 40)),
+  make_sensitivity("fmi_surface", seq(min(lk$grid_fmi),  max(lk$grid_fmi),  length.out = 40)),
+  make_sensitivity("sm_top",      seq(min(lk$grid_sm_top), max(lk$grid_sm_top), length.out = 40)),
+  make_sensitivity("lapse",       seq(min(lk$grid_lapse),  max(lk$grid_lapse),  length.out = 40))
+) %>%
+  mutate(predictor = recode(predictor,
+    wind        = "Wind speed (km/h)",
+    fmi_surface = "FMI (Sharples)",
+    sm_top      = "Soil moisture 0–10 cm",
+    lapse       = "Lapse rate 850–700 hPa"
+  ))
+
+ggplot(sens_dat, aes(value, median)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.25, fill = "#2166ac") +
+  geom_line(colour = "#2166ac", linewidth = 1) +
+  facet_wrap(~predictor, scales = "free_x", ncol = 2) +
+  labs(title = "Sensitivity of predicted ROS to each predictor (q50 model)",
+       subtitle = "Other predictors held at their median. Shading = 80% credible interval.",
+       x = "Predictor value", y = "Predicted ROS (km/h)") +
+  theme_bw()
+```
+
+---
+
+# 10. Fire spread ellipse geometry
+
+Once ROS is predicted (km/h), the app converts it to a **spatial fire perimeter** using
+a standard ellipse model of fire spread shape. Inputs are ROS, spread duration, the
+length-to-breadth (L:B) ratio, and the spread direction.
+
+```{r ellipse-fn}
+fire_ellipse_pts <- function(ros_kmh, time_hr, lb_ratio, spread_dir_deg, n = 300) {
+  if (is.na(ros_kmh) || ros_kmh <= 0) return(tibble(x = 0, y = 0))
+
+  # 1. Head and back distances from the ignition point
+  head_dist  <- ros_kmh * time_hr          # how far the fire front travels
+  back_dist  <- head_dist / lb_ratio^2     # back fire is much slower
+
+  # 2. Semi-axes and centre offset of the ellipse
+  a          <- (head_dist + back_dist) / 2   # semi-major axis (along spread direction)
+  b          <- a / lb_ratio                   # semi-minor axis (perpendicular)
+  center_fwd <- (head_dist - back_dist) / 2   # ignition isn't at ellipse centre
+
+  # 3. Unit vectors along and perpendicular to spread direction
+  dir_rad    <- spread_dir_deg * pi / 180
+  fwd_x <-  sin(dir_rad); fwd_y <-  cos(dir_rad)
+  rgt_x <-  cos(dir_rad); rgt_y <- -sin(dir_rad)
+  cx <- center_fwd * fwd_x; cy <- center_fwd * fwd_y
+
+  # 4. Parametric ellipse in km, rotated to the spread direction
+  theta <- seq(0, 2 * pi, length.out = n + 1)
+  tibble(
+    x = a * cos(theta) * fwd_x + b * sin(theta) * rgt_x + cx,
+    y = a * cos(theta) * fwd_y + b * sin(theta) * rgt_y + cy
+  )
+}
+```
+
+```{r ellipse-demo, fig.height=5, fig.width=6}
+ros_med <- pred_summary$median[1]   # q50 median ROS from earlier
+ros_q90 <- pred_summary$median[2]   # q90 median ROS
+
+ell_q50 <- fire_ellipse_pts(ros_med, time_hr = 1, lb_ratio = 2, spread_dir_deg = 45)
+ell_q90 <- fire_ellipse_pts(ros_q90, time_hr = 1, lb_ratio = 2, spread_dir_deg = 45)
+
+bind_rows(
+  mutate(ell_q50, model = glue("q50 — {round(ros_med, 2)} km/h")),
+  mutate(ell_q90, model = glue("q90 — {round(ros_q90, 2)} km/h"))
+) %>%
+  ggplot(aes(x, y, colour = model)) +
+  geom_path(linewidth = 1) +
+  geom_point(aes(0, 0), colour = "black", size = 3, inherit.aes = FALSE) +
+  annotate("text", x = 0.05, y = -0.15, label = "Ignition", hjust = 0, size = 3.5) +
+  coord_equal() +
+  scale_colour_manual(values = c("#2166ac", "#b2182b")) +
+  labs(title = "Fire spread ellipse — 1 hour, L:B = 2, direction = 45° (NE)",
+       x = "km (west–east)", y = "km (south–north)", colour = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+The ignition point sits behind the ellipse centre — head fire travels much further than
+back fire. The shaded ring shown in the app is the area between the 10th and 90th
+percentile ellipses (from the 80% CI of the draws), not q50 vs q90.
+
+---
+
+# 11. McArthur Mk5 and Vesta Mk2 (comparison models)
+
+The "Model Comparison" tab shows two independent empirical fire behaviour models alongside
+the Bayesian model. These are **deterministic** — they produce a single ROS value with no
+uncertainty, calculated directly from the weather inputs.
+
+## McArthur Mk5
+
+```{r mcarthur-fn}
+calc_mcarthur <- function(temp, rh, drought_factor, wind, fuel_load) {
+  ffdi    <- 2 * exp(-0.450 + 0.987 * log(drought_factor) - 0.0345 * rh +
+                     0.0338 * temp + 0.0234 * wind)
+  ros_kmh <- 0.0012 * ffdi * fuel_load
+  list(ffdi = ffdi, ros = ros_kmh)
+}
+
+mc <- calc_mcarthur(temp_val, rh_val, drought_factor = 10, wind_val, fuel_load = 20)
+cat(glue("FFDI = {round(mc$ffdi, 1)},  McArthur ROS = {round(mc$ros, 2)} km/h\n"))
+```
+
+FFDI is the Forest Fire Danger Index — a dimensionless severity score. ROS is then a
+simple product of FFDI and fuel load.
+
+## Vesta Mk2
+
+Vesta is more complex: it calculates fuel moisture content from time of day, then applies
+three fire behaviour phases (I, II, III) weighted by logistic probability functions:
+
+```{r vesta-fn}
+calc_vesta <- function(wind10, temp, rh, waf, ws, hu, drought_factor, slope_deg, hour) {
+  wind2 <- wind10 / waf   # adjust 10 m wind to 2 m under-canopy wind
+
+  # Fuel moisture content — equation depends on time of day
+  mc <- if (hour >= 12 && hour < 17) {
+    2.76 + 0.124 * rh - 0.0187 * temp
+  } else if ((hour >= 9 && hour < 12) || (hour >= 17 && hour < 20)) {
+    3.6 + 0.169 * rh - 0.045 * temp
+  } else {
+    3.08 + 0.198 * rh - 0.0483 * temp
+  }
+
+  # Moisture and drought coefficients reduce effective fuel availability
+  moisture_coeff    <- 0.9082 + 0.1206 * mc - 0.03106 * mc^2 + 0.001853 * mc^3 - 0.00003467 * mc^4
+  moisture_coeff    <- if (mc < 4.1) 1 else if (mc > 24) 0 else moisture_coeff
+  fuel_availability <- 1.008 / (1 + 104.9 * exp(-0.9306 * drought_factor))
+  moisture_coeff    <- moisture_coeff * fuel_availability
+
+  slope_coeff  <- 2^(0.1 * abs(slope_deg))
+  slope_factor <- if (slope_deg >= 0) slope_coeff else slope_coeff / (2 * slope_coeff - 1)
+
+  # Phase I (surface): wind < 2 m/s gives minimum spread; above that, wind-driven
+  ros1_head <- if (wind2 < 2) {
+    0.03 * moisture_coeff * slope_factor
+  } else {
+    (0.03 + 0.05024 * (wind2 - 1)^0.92628 * (ws * 0.1)^0.79928) * moisture_coeff * slope_factor
+  }
+  # Phase II (elevated fuel): dependent on 2 m wind and understorey height
+  ros2_head <- 0.19591 * wind2^0.8257 * (ws * 0.1)^0.4672 * hu^0.495 * moisture_coeff * slope_factor
+  # Phase III (crown / wind-driven): no slope term
+  ros3_head <- 0.05235 * wind10^1.19128 * moisture_coeff
+
+  # Logistic probability of transitioning to Phase II or III
+  g2 <- -23.9315 + 1.7033 * wind2 + 12.0822 * moisture_coeff + 0.9524 * ws
+  p2 <- if (ws < 1) 0 else 1 / (1 + exp(-g2))
+
+  g3 <- -32.3074 + 0.2951 * wind10 + 26.8734 * moisture_coeff
+  p3 <- if (ros2_head < 0.3) 0 else 1 / (1 + exp(-g3))
+
+  # Weighted combination: if mostly Phase I/II; if mostly Phase II/III
+  ros_kmh <- if (p2 < 0.5) {
+    ros1_head * (1 - p2) + ros2_head * p2
+  } else {
+    (ros1_head * (1 - p2) + ros2_head * p2) * (1 - p3) + ros3_head * p3
+  }
+
+  list(mc = mc, ros = ros_kmh)
+}
+
+vesta <- calc_vesta(wind10 = wind_val, temp = temp_val, rh = rh_val,
+                    waf = 2.5, ws = 20, hu = 0.5,
+                    drought_factor = 10, slope_deg = 0, hour = 14)
+cat(glue("Vesta fuel MC = {round(vesta$mc, 1)}%,  Vesta ROS = {round(vesta$ros, 2)} km/h\n"))
+```
+
+---
+
+# 12. Full prediction summary for the example inputs
+
+```{r full-summary, echo=FALSE}
+tibble(
+  Model = c("Bayesian q50 (median)", "Bayesian q90 (extreme)", "McArthur Mk5", "Vesta Mk2"),
+  `ROS (km/h)` = c(
+    round(pred_summary$median[1], 2),
+    round(pred_summary$median[2], 2),
+    round(mc$ros, 2),
+    round(vesta$ros, 2)
+  ),
+  `80% CI` = c(
+    glue("{round(pred_summary$lo[1], 2)}–{round(pred_summary$hi[1], 2)}"),
+    glue("{round(pred_summary$lo[2], 2)}–{round(pred_summary$hi[2], 2)}"),
+    "—",
+    "—"
+  ),
+  Notes = c(
+    "50% of fires expected to spread faster than this",
+    "10% of fires expected to spread faster than this",
+    glue("FFDI = {round(mc$ffdi, 1)}"),
+    glue("Fuel MC = {round(vesta$mc, 1)}%")
+  )
+) %>%
+  knitr::kable(caption = glue(
+    "Predictions for: wind={wind_val} km/h, temp={temp_val}°C, RH={rh_val}%,
+     FMI={fmi_val}, pyroregion={pyroregion_val}, drought=10, fuel=20 t/ha"
+  ))
+```
+
+---
+
+# Appendix: Why use a lookup table?
+
+Calling `posterior_linpred()` on a brms/Stan model at runtime requires loading the
+full Stan shared library (~100 MB), deserialising the fitted model (~10–50 MB),
+and running matrix operations over all posterior samples. On a typical laptop this
+takes 2–10 seconds per prediction.
+
+The lookup-table approach precomputes the posterior draws of each additive term on a
+fine grid (done once by `precompute_lookup.R`), then reads that grid (~1–5 MB) and
+interpolates from it at runtime. Prediction time drops to <50 ms, well within the
+app's 700 ms debounce delay.
+
+Accuracy: bilinear interpolation on the grid used in `prediction_lookup.rds` has been
+verified to reproduce `posterior_linpred()` to within < 0.005 km/h across the training
+data range (see comments in `precompute_lookup.R`).
+
+```{r session-info, echo=FALSE}
+sessionInfo()
+```
