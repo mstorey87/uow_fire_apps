@@ -4,7 +4,7 @@ library(leaflet.extras)
 library(sf)
 library(dplyr)
 library(lubridate)
-library(wfprogression)
+library(fireobs)
 
 # ---- helper: safe CRS handling ----
 fix_crs <- function(x) {
