@@ -31,7 +31,7 @@ library(sf)
 library(dplyr)
 library(smoothr)
 
-
+#this one for docker build
 reticulate::use_python("/srv/venv/bin/python", required = TRUE)
 wk_dir <- "/srv/tmp"
 chkp_dir='/srv/venv/checkpoints'
