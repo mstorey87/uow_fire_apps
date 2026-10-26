@@ -416,23 +416,38 @@ map</td>
 <p>Maps fire perimeters from airborne line scan imagery. It uses Meta’s
 <a href="https://github.com/facebookresearch/sam2">Segment Anything
 Model 2 (SAM2)</a> through the <a href="https://github.com/mstorey87/fireobs"><code>fireobs</code></a> R
-package.</p>
+package. The tool demonstrates how the Segment Anything model can be
+applied specifically to the issue of mapping active fires from images,
+to save manual mapping time. The process can captured the edges of
+actively burning area and burnt area. The process requires the combined
+automated component with manual oversight and correction. Some scans may
+only need minimal correction, some may require more depending on if the
+image is washed out, how bright the burning area is, the contrast
+between burnt and unburnt area, cloud cover etc. Meta releases new
+versions of the Segment Anything model (version 3 is available as at Oct
+2026). The accuracy and speed could be improved by adopting new
+versions, using a GPU enabled computer and conducting a specific model
+training process on line scan data.</p>
 <p>Workflow:</p>
 <ol style="list-style-type: decimal">
 <li><strong>Upload</strong> one or more 3-band GeoTIFF line scans. File
 names should start with a timestamp in <code>YYYYmmddHHMMSS</code>
-format so the polygon gets the right date and time.</li>
-<li><strong>Preview</strong> the scans on a map. Drag them to set the
+format so the polygon gets the right date and time, although the process
+should still work if that is not done.</li>
+<li><strong>Preview</strong> the scans on a map. In cases where multiple
+scans are uploaded to cover a single fire area, drag them to set the
 merge order (the top scan is on top, and its time and name are used for
 the polygon). Untick any scans you don’t need, then click <strong>Send
 to mapping tool</strong>.</li>
-<li><strong>Create polygons.</strong> Draw a few points <em>or</em>
-polygons (not both) over the fire area, then click
-<strong>Auto-map</strong> to segment it. Refine the result with:
+<li><strong>Create polygons.</strong> Draw a series of points
+<em>or</em> polygons (not both) over the fire area, then click
+<strong>Auto-map</strong> to run the sam2 model, which produces the
+polygon. Refine the result with:
 <ul>
 <li><strong>Keep Selected</strong>: keep only the polygons you click
 on</li>
-<li><strong>Cut</strong>: remove the area under a drawn polygon</li>
+<li><strong>Cut</strong>: remove the area under a manually drawn polygon
+(ie a polygon you draw over the auto-generated polygon)</li>
 <li><strong>Union</strong>: add a drawn area to the fire polygon</li>
 <li><strong>Fill Holes</strong>: fill small gaps automatically</li>
 <li><strong>Undo</strong> / <strong>Restart</strong></li>
@@ -446,15 +461,18 @@ Uploads of up to 500 MB are allowed.</p>
 <div id="app-measure-spread-measure-spread-lines-and-ros" class="section level3">
 <h3><code>app-measure-spread</code>: Measure spread lines and ROS</h3>
 <p>Measures how far and how fast a fire spread between successive
-perimeters.</p>
+perimeters. The methods is the same that is used in “Derivation of a
+Bayesian fire spread model using large-scale wildfire observations” (<a href="https://doi.org/10.1016/j.envsoft.2021.105127" class="uri">https://doi.org/10.1016/j.envsoft.2021.105127</a>)</p>
 <ol style="list-style-type: decimal">
 <li><strong>Upload</strong> fire progression polygons as a GeoPackage
 (<code>.gpkg</code>) or zipped shapefile (<code>.zip</code>). The layer
-needs a date/time column for each perimeter.</li>
+needs a posix date/time column for each perimeter.</li>
 <li><strong>Choose</strong> the date/time column and its time zone. The
 app checks that the values parse.</li>
 <li><strong>Draw</strong> a polygon on the map around the perimeters you
-want to analyse (at least two time steps are needed).</li>
+want to analyse (at least two time steps are needed). This is so the
+user can focus on a specific location in the context of a larger
+fire.</li>
 <li>Choose whether to keep only the <strong>maximum spread line</strong>
 per time step, and whether to use <strong>convex hulls</strong> of the
 perimeters.</li>
@@ -464,7 +482,8 @@ the map and listed in a results table.</li>
 </ol>
 <p>Spread lines are calculated with
 <code>fireobs::fire_max_spread_line()</code> in GDA94 / Geoscience
-Australia Lambert (EPSG:3112).</p>
+Australia Lambert (EPSG:3112). This package is available on github.
+Contact Michael Storey.</p>
 </div>
 <div id="app-predict-spread-fire-ros-prediction" class="section level3">
 <h3><code>app-predict-spread</code>: Fire ROS prediction</h3>

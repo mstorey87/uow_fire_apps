@@ -42,7 +42,7 @@ Scans are downsampled (5× aggregation) to keep segmentation fast. Uploads of up
 
 ### `app-measure-spread`: Measure spread lines and ROS
 
-Measures how far and how fast a fire spread between successive perimeters.
+Measures how far and how fast a fire spread between successive perimeters. The methods is the same that is used in "Derivation of a Bayesian fire spread model using large-scale wildfire observations" (https://doi.org/10.1016/j.envsoft.2021.105127)
 
 1. **Upload** fire progression polygons as a GeoPackage (`.gpkg`) or zipped shapefile (`.zip`). The layer needs a posix date/time column for each perimeter.
 2. **Choose** the date/time column and its time zone. The app checks that the values parse.
@@ -159,20 +159,9 @@ pip install opencv-python-headless
 
 Use the CUDA build of PyTorch instead of the CPU build if you have a supported GPU.
 
-**3. SAM2 checkpoint and config**
+**3. Point the app at your local paths**
 
-Download the model weights and config into a checkpoints folder, keeping this layout:
-
-```
-checkpoints/
-├── sam2.1_hiera_base_plus.pt      # https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
-└── sam2.1/
-    └── sam2.1_hiera_b+.yaml       # from sam2/configs/sam2.1/ in the SAM2 GitHub repo
-```
-
-**4. Point the app at your local paths**
-
-At the top of `app-sam-fire/app.R`, the paths are set for the Docker deployment (`/srv/venv/...`, `/srv/tmp`). For a local install, swap them for your own Python environment, checkpoints folder and a writable working directory. The file has a commented-out example of this:
+At the top of `app-sam-fire/app.R`, the paths are set for the Docker deployment (`/srv/venv/...`, `/srv/tmp`). For a local install, swap them for your own Python environment, a checkpoints folder and a writable working directory. The file has a commented-out example of this:
 
 ```r
 reticulate::use_condaenv(condaenv = "my_sam2_env")   # or reticulate::use_virtualenv("path/to/sam2_env")
@@ -182,7 +171,22 @@ fireobs:::fire_load_sam_once("C:/path/to/checkpoints",
 wk_dir <- "C:/temp/wk_dir"
 ```
 
-**5. Run**
+You don't need to download the SAM2 model weights or config yourself. The first time the app starts, `fire_load_sam_once()` checks the checkpoints folder and, if the files aren't there, downloads them into this layout:
+
+```
+checkpoints/
+├── sam2.1_hiera_base_plus.pt
+└── sam2.1/
+    └── sam2.1_hiera_b+.yaml
+```
+
+Later runs reuse the downloaded files. A few things to note:
+
+- The parent of the checkpoints folder must already exist (e.g. `C:/path/to/` in the example above).
+- The `base_plus` checkpoint is about 300 MB, and R's default download timeout is 60 seconds. On a slower connection, run `options(timeout = 1800)` before starting the app.
+- If no checkpoints folder is given, the files are saved to R's temporary folder and downloaded again every session.
+
+**4. Run**
 
 ```r
 shiny::runApp("uow_fire_apps/app-sam-fire")
