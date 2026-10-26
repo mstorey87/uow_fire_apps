@@ -1,0 +1,183 @@
+---
+title: "Install everything needed for the SAM fire mapping app"
+output: html_document
+---
+
+This document installs the R packages, Python, the Python packages (PyTorch and SAM2) and the SAM2 model weights needed to run `app-sam-fire`.
+
+**How to use it:** open this file in RStudio, check the settings in the first chunk, then click **Run All** (Ctrl+Alt+R) or **Knit**. It takes 10–30 minutes the first time, mostly downloading PyTorch and the model weights.
+
+**Start from a fresh R session** (Session → Restart R). Once R has connected to a Python, it can't switch to another one, so the Python setup below only works in a session that hasn't used Python yet.
+
+# 1. Settings
+
+Change these if needed. The defaults work for most people.
+
+```{r settings}
+# Path to an existing Python 3.10-3.12 executable, e.g.
+#   Windows: "C:/Users/me/AppData/Local/Programs/Python/Python311/python.exe"
+#   Mac/Linux: "/usr/bin/python3"
+# Leave as NULL to find a suitable Python automatically, or install one if none is found.
+python_path <- NULL
+
+# Name of the Python virtual environment to create for SAM2.
+envname <- "sam2_env_testa"
+
+# PyTorch build:
+#   "cpu"   - works on any computer (slower segmentation)
+#   "cu126" - NVIDIA GPU with a recent driver (check with `nvidia-smi`; "cu124" or "cu118" for older drivers)
+# Ignored on macOS, where the standard build is used (it supports Apple Silicon GPUs).
+torch_build <- "cpu"
+
+# Folder for the SAM2 model weights (~300 MB for the default Base+ model).
+checkpoints_dir <- file.path(path.expand("~"), "sam2", "checkpoints")
+
+# Writable working folder the app uses for temporary files.
+wk_dir <- file.path(path.expand("~"), "sam2", "wk_dir")
+```
+
+```{r setup-options, include = FALSE}
+knitr::opts_chunk$set(message = TRUE, warning = TRUE)
+# Large downloads (PyTorch, model weights) need longer than R's default 60 s timeout.
+options(timeout = 3600)
+```
+
+# 2. R packages
+
+Installs any of the app's R packages that are missing, then the `fireobs` package from GitHub.
+
+```{r r-packages}
+cran_pkgs <- c(
+  "shiny", "leaflet", "leaflet.extras", "sortable", "leafem", "terra", "sf",
+  "dplyr", "smoothr", "bsplus", "geojsonsf", "jsonlite", "lwgeom", "nngeo",
+  "units", "purrr", "glue", "magick", "reticulate", "remotes"
+)
+
+missing_pkgs <- cran_pkgs[!vapply(cran_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+
+if (length(missing_pkgs) > 0) {
+  message("Installing: ", paste(missing_pkgs, collapse = ", "))
+  install.packages(missing_pkgs, repos = "https://cloud.r-project.org")
+} else {
+  message("All CRAN packages already installed.")
+}
+
+remotes::install_github("mstorey87/fireobs", upgrade = "never")
+
+still_missing <- c(cran_pkgs, "fireobs")[
+  !vapply(c(cran_pkgs, "fireobs"), requireNamespace, logical(1), quietly = TRUE)
+]
+if (length(still_missing) > 0) {
+  stop("These R packages failed to install: ", paste(still_missing, collapse = ", "),
+       "\nScroll up for the error messages.")
+}
+```
+
+# 3. Python
+
+Uses `python_path` if you set one. Otherwise it looks for an installed Python 3.10–3.12, and installs Python 3.11 through `reticulate` if none is found. SAM2 needs Python 3.10 or newer, and PyTorch may not yet support the very newest Python release.
+
+```{r python}
+library(reticulate)
+
+if (is.null(python_path)) {
+  python_path <- reticulate::virtualenv_starter(">=3.10,<3.13")
+  if (is.null(python_path)) {
+    message("No suitable Python found - installing Python 3.11 (this can take a few minutes).")
+    python_path <- reticulate::install_python(version = "3.11:latest")
+  }
+}
+
+if (!file.exists(python_path)) stop("Python not found at: ", python_path)
+message("Using Python: ", python_path)
+system2(python_path, "--version")
+```
+
+# 4. Python virtual environment and packages
+
+Creates a separate virtual environment so SAM2 and PyTorch don't interfere with any other Python projects.
+
+```{r python-env}
+if (!reticulate::virtualenv_exists(envname)) {
+  reticulate::virtualenv_create(envname, python = python_path,
+                                packages = c("pip", "setuptools", "wheel", "numpy"))
+} else {
+  message("Virtual environment '", envname, "' already exists - reusing it.")
+}
+
+# PyTorch. Windows and Linux need an explicit index to get the CPU or the matching CUDA build.
+torch_pip_options <- if (Sys.info()[["sysname"]] == "Darwin") {
+  character()
+} else {
+  c("--index-url", paste0("https://download.pytorch.org/whl/", torch_build))
+}
+reticulate::virtualenv_install(envname, c("torch", "torchvision"),
+                               pip_options = torch_pip_options)
+
+reticulate::virtualenv_install(envname, "opencv-python-headless")
+
+# SAM2, installed from GitHub as a zip so git isn't needed.
+# SAM2_BUILD_CUDA=0 skips an optional CUDA extension that often fails to compile;
+# --no-build-isolation stops pip downloading a second copy of PyTorch just to build SAM2.
+Sys.setenv(SAM2_BUILD_CUDA = "0")
+reticulate::virtualenv_install(
+  envname,
+  "https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip",
+  pip_options = "--no-build-isolation"
+)
+```
+
+# 5. Check the Python setup
+
+```{r python-check}
+reticulate::use_virtualenv(envname, required = TRUE)
+
+torch <- reticulate::import("torch")
+reticulate::import("sam2")
+reticulate::import("cv2")
+
+message("PyTorch version: ", torch$`__version__`)
+message("GPU (CUDA) available: ", torch$cuda$is_available())
+if (torch_build != "cpu" && !torch$cuda$is_available()) {
+  warning("A GPU build of PyTorch was requested but no GPU was detected - ",
+          "SAM2 will run on the CPU. Check your NVIDIA driver with `nvidia-smi`.")
+}
+```
+
+# 6. Download the model weights and test SAM2
+
+`fire_load_sam_once()` downloads the checkpoint and config into `checkpoints_dir` if they aren't already there, then loads the model. If this chunk finishes without an error, the app is ready to run.
+
+```{r sam-check}
+dir.create(checkpoints_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(wk_dir, recursive = TRUE, showWarnings = FALSE)
+
+fireobs:::fire_load_sam_once(
+  checkpoints_dir,
+  pt_name   = "sam2.1_hiera_base_plus.pt",
+  yaml_name = "sam2.1_hiera_b+.yaml"
+)
+```
+
+# 7. Point the app at this setup
+
+Replace the setup lines near the top of `app.R` (the `reticulate::use_python(...)`, `wk_dir` and `chkp_dir` lines) with the lines printed below:
+
+```{r app-config, echo = FALSE}
+venv_python <- normalizePath(reticulate::virtualenv_python(envname), winslash = "/")
+cat(sprintf(
+'reticulate::use_python("%s", required = TRUE)
+wk_dir   <- "%s"
+chkp_dir <- "%s"
+',
+  venv_python,
+  normalizePath(wk_dir, winslash = "/"),
+  normalizePath(checkpoints_dir, winslash = "/")
+))
+```
+
+Then start the app:
+
+```r
+shiny::runApp("app-sam-fire")
+```
