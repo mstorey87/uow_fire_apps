@@ -32,17 +32,17 @@ library(dplyr)
 library(smoothr)
 
 #this one for docker build
-reticulate::use_python("/srv/venv/bin/python", required = TRUE)
-wk_dir <- "/srv/tmp"
-chkp_dir='/srv/venv/checkpoints'
+# reticulate::use_python("/srv/venv/bin/python", required = TRUE)
+# wk_dir <- "/srv/tmp"
+# chkp_dir='/srv/venv/checkpoints'
 
 # reticulate::use_condaenv(condaenv = "my_sam2_env")
 # wk_dir <- "D:\\temp\\wk_dir"
 # chkp_dir="D:\\temp\\checkpoints"
 
-# reticulate::use_python("C:/Users/mstorey/Documents/.virtualenvs/sam2_env_testa/Scripts/python.exe", required = TRUE)
-# wk_dir   <- "C:/Users/mstorey/Documents/sam2/wk_dir"
-# chkp_dir <- "C:/Users/mstorey/Documents/sam2/checkpoints"
+reticulate::use_python("C:/Users/mstorey/Documents/.virtualenvs/sam2_env_testa2/Scripts/python.exe", required = TRUE)
+wk_dir   <- "C:/Users/mstorey/Documents/sam2/wk_dir"
+chkp_dir <- "C:/Users/mstorey/Documents/sam2/checkpoints"
 
 sam2_models <- list(
  # "Tuned"   = list(pt = "sam2_finetuned.pt",       yaml = "sam2.1_hiera_t.yaml"),

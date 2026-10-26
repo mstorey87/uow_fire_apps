@@ -17,11 +17,11 @@ Change these if needed. The defaults work for most people.
 # Path to an existing Python 3.10-3.12 executable, e.g.
 #   Windows: "C:/Users/me/AppData/Local/Programs/Python/Python311/python.exe"
 #   Mac/Linux: "/usr/bin/python3"
-# Leave as NULL to find a suitable Python automatically, or install one if none is found.
+# Leave as NULL to find an installed Python automatically (section 3 explains what to do if none is found).
 python_path <- NULL
 
 # Name of the Python virtual environment to create for SAM2.
-envname <- "sam2_env_testa"
+envname <- "sam2_env_testa3"
 
 # PyTorch build:
 #   "cpu"   - works on any computer (slower segmentation)
@@ -75,16 +75,36 @@ if (length(still_missing) > 0) {
 
 # 3. Python
 
-Uses `python_path` if you set one. Otherwise it looks for an installed Python 3.10–3.12, and installs Python 3.11 through `reticulate` if none is found. SAM2 needs Python 3.10 or newer, and PyTorch may not yet support the very newest Python release.
+Uses `python_path` if you set one. Otherwise it looks for an installed Python 3.10–3.12. SAM2 needs Python 3.10 or newer, and PyTorch may not yet support the very newest Python release.
+
+If none is found, install Python yourself:
+
+1. Download Python 3.11 from <https://www.python.org/downloads/release/python-3119/> ("Windows installer (64-bit)" on Windows, or the macOS installer). On Ubuntu/Debian, run `sudo apt install python3 python3-venv` instead.
+2. Run the installer with the default options.
+3. Find the path to `python.exe` (Windows) or `python3` (Mac/Linux). On Windows it is usually `C:/Users/<you>/AppData/Local/Programs/Python/Python311/python.exe`.
+4. Run this chunk again and paste that path when asked, or set `python_path` in the settings chunk.
 
 ```{r python}
 library(reticulate)
 
+no_python_msg <- paste0(
+  "No Python 3.10-3.12 was found.\n",
+  "Install Python 3.11 from https://www.python.org/downloads/release/python-3119/ ",
+  "(Ubuntu/Debian: sudo apt install python3 python3-venv),\n",
+  "then set python_path in the settings chunk to the path of python.exe / python3 and run again."
+)
+
 if (is.null(python_path)) {
   python_path <- reticulate::virtualenv_starter(">=3.10,<3.13")
-  if (is.null(python_path)) {
-    message("No suitable Python found - installing Python 3.11 (this can take a few minutes).")
-    python_path <- reticulate::install_python(version = "3.11:latest")
+}
+
+if (is.null(python_path)) {
+  if (interactive()) {
+    message(no_python_msg)
+    python_path <- trimws(readline("Or paste the path to python.exe / python3 here (blank to stop): "), whitespace = "[\\s\"']")
+    if (!nzchar(python_path)) stop("No Python path given.")
+  } else {
+    stop(no_python_msg)
   }
 }
 
