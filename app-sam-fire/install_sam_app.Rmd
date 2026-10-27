@@ -136,15 +136,24 @@ reticulate::virtualenv_install(envname, c("torch", "torchvision"),
 
 reticulate::virtualenv_install(envname, "opencv-python-headless")
 
-# SAM2, installed from GitHub as a zip so git isn't needed.
-# SAM2_BUILD_CUDA=0 skips an optional CUDA extension that often fails to compile;
-# --no-build-isolation stops pip downloading a second copy of PyTorch just to build SAM2.
-Sys.setenv(SAM2_BUILD_CUDA = "0")
-reticulate::virtualenv_install(
-  envname,
-  "https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip",
-  pip_options = "--no-build-isolation"
-)
+# SAM2's own dependencies (from its setup.py).
+reticulate::virtualenv_install(envname, c("tqdm", "hydra-core", "iopath", "pillow"))
+
+# SAM2 itself is plain Python (its only compiled part is an optional GPU extension), so rather than
+# building it with pip, its source folder is downloaded from GitHub and copied into the environment.
+sam2_zip <- file.path(tempdir(), "sam2-main.zip")
+download.file("https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip",
+              sam2_zip, mode = "wb")
+unzip(sam2_zip, exdir = tempdir())
+
+venv_python <- reticulate::virtualenv_python(envname)
+site_packages <- system2(venv_python,
+                         c("-c", shQuote("import sysconfig; print(sysconfig.get_paths()['purelib'])")),
+                         stdout = TRUE)
+unlink(file.path(site_packages, "sam2"), recursive = TRUE)
+ok <- file.copy(file.path(tempdir(), "sam2-main", "sam2"), site_packages, recursive = TRUE)
+if (!ok) stop("Couldn't copy SAM2 into ", site_packages)
+message("SAM2 copied to ", file.path(site_packages, "sam2"))
 ```
 
 # 5. Check the Python setup
