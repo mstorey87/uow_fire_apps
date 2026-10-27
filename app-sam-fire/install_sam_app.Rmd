@@ -18,10 +18,10 @@ Change these if needed. The defaults work for most people.
 #   Windows: "C:/Users/me/AppData/Local/Programs/Python/Python311/python.exe"
 #   Mac/Linux: "/usr/bin/python3"
 # Leave as NULL to find an installed Python automatically (section 3 explains what to do if none is found).
-python_path <- "C:\\Users\\mstorey\\AppData\\Local\\Programs\\Python\\Python314\\python.exe"
+python_path <- NULL
 
 # Name of the Python virtual environment to create for SAM2.
-envname <- "sam2_env_testa6"
+envname <- "sam2_env"
 
 # PyTorch build:
 #   "cpu"   - works on any computer (slower segmentation)

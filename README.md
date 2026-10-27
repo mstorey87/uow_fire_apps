@@ -91,11 +91,13 @@ All apps need **R (≥ 4.3 recommended)**. The spatial packages (`sf`, `terra`) 
 sudo apt install libgdal-dev gdal-bin libproj-dev libgeos-dev libudunits2-dev libcurl4-openssl-dev libssl-dev libxml2-dev
 ```
 
-Clone the repository:
+Get a copy of the repository, either with git:
 
 ```bash
 git clone https://github.com/mstorey87/uow_fire_apps.git
 ```
+
+or without git: on the GitHub page click **Code → Download ZIP** and unzip it.
 
 ### `app-predict-spread` (simplest)
 
@@ -134,67 +136,49 @@ shiny::runApp("uow_fire_apps/app-measure-spread")
 
 ### `app-sam-fire` (needs Python + SAM2)
 
-This app calls SAM2 from Python through `reticulate`, so it needs a Python environment as well as R.
+This app runs SAM2 in Python, called from R through `reticulate`. Everything it needs apart from R, RStudio and Python is installed by [`app-sam-fire/install_sam_app.Rmd`](app-sam-fire/install_sam_app.Rmd).
 
-**1. R packages**
+**1. Install R, RStudio and Python yourself first**
 
-```r
-install.packages(c("shiny", "leaflet", "leaflet.extras", "sortable", "leafem", "terra",
-                   "sf", "dplyr", "bsplus", "reticulate", "geojsonsf", "jsonlite",
-                   "lwgeom", "nngeo", "smoothr", "units", "purrr", "magick", "remotes"))
-remotes::install_github("mstorey87/fireobs")
-```
+| Software | Where to get it | Notes |
+|---|---|---|
+| R (≥ 4.3) | <https://cran.r-project.org/> | |
+| RStudio Desktop | <https://posit.co/download/rstudio-desktop/> | Used to run the install document and the app |
+| Python 3.10–3.12 | <https://www.python.org/downloads/> | 3.11 or 3.12 recommended. Avoid the newest Python release, because PyTorch and other packages can take a few months to support it |
 
-**2. Python environment with SAM2** (Python ≥ 3.10; conda or venv both work)
+**You need to know the path to your Python.** The install document asks for it. Typical locations:
 
-```bash
-python -m venv sam2_env
-```
+- **Windows:** `C:/Users/<you>/AppData/Local/Programs/Python/Python311/python.exe`. If Python is on your PATH, `where python` in a Command Prompt shows it.
+- **Mac/Linux:** `/usr/bin/python3` or `/usr/local/bin/python3`. `which python3` in a terminal shows it.
 
-Activate the environment, then:
+Git is not needed.
 
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pip install git+https://github.com/facebookresearch/sam2.git
-pip install opencv-python-headless
-```
+**2. Run the install document**
 
-Use the CUDA build of PyTorch instead of the CPU build if you have a supported GPU.
+1. Open `app-sam-fire/install_sam_app.Rmd` in RStudio.
+2. Restart R (**Session → Restart R**). The setup only works in a session that hasn't used Python yet.
+3. In the **Settings** chunk at the top:
+   - set `python_path` to your Python path, using forward slashes (or leave it as `NULL` to let it search for one);
+   - optionally change `torch_build` to a CUDA build (e.g. `"cu126"`) if you have an NVIDIA GPU;
+   - optionally change where the model weights (`checkpoints_dir`) and temporary files (`wk_dir`) go.
+4. Click **Run All** (Ctrl+Alt+R), or **Knit**.
 
-**3. Point the app at your local paths**
+It takes 10–30 minutes the first time. It:
 
-At the top of `app-sam-fire/app.R`, the paths are set for the Docker deployment (`/srv/venv/...`, `/srv/tmp`). For a local install, swap them for your own Python environment, a checkpoints folder and a writable working directory. The file has a commented-out example of this:
+- installs the R packages, including `fireobs` from GitHub;
+- creates a Python virtual environment (`sam2_env`) and installs PyTorch, OpenCV and SAM2 into it;
+- checks that Python and SAM2 load, and reports whether a GPU was found;
+- downloads the SAM2 model weights (about 300 MB) and loads the model as a final test.
 
-```r
-reticulate::use_condaenv(condaenv = "my_sam2_env")   # or reticulate::use_virtualenv("path/to/sam2_env")
-fireobs:::fire_load_sam_once("C:/path/to/checkpoints",
-                                   pt_name   = "sam2.1_hiera_base_plus.pt",
-                                   yaml_name = "sam2.1_hiera_b+.yaml")
-wk_dir <- "C:/temp/wk_dir"
-```
+**3. Point the app at your setup**
 
-You don't need to download the SAM2 model weights or config yourself. The first time the app starts, `fire_load_sam_once()` checks the checkpoints folder and, if the files aren't there, downloads them into this layout:
+At the end, the install document prints three lines (`reticulate::use_python(...)`, `wk_dir` and `chkp_dir`). Paste them over the matching lines near the top of `app-sam-fire/app.R`. The ones there now are for the Docker deployment (`/srv/venv/...`, `/srv/tmp`).
 
-```
-checkpoints/
-├── sam2.1_hiera_base_plus.pt
-└── sam2.1/
-    └── sam2.1_hiera_b+.yaml
-```
+**4. Run the app**
 
-Later runs reuse the downloaded files. A few things to note:
+Open `app-sam-fire/app.R` in RStudio and click **Run App**, or run the `shiny::runApp(...)` command printed at the end of the install document. It uses the full path to the app folder, so it works whatever R's working directory is.
 
-- The parent of the checkpoints folder must already exist (e.g. `C:/path/to/` in the example above).
-- The `base_plus` checkpoint is about 300 MB, and R's default download timeout is 60 seconds. On a slower connection, run `options(timeout = 1800)` before starting the app.
-- If no checkpoints folder is given, the files are saved to R's temporary folder and downloaded again every session.
-
-**4. Run**
-
-```r
-shiny::runApp("uow_fire_apps/app-sam-fire")
-```
-
-Segmentation runs on the CPU by default and can take a while on large scans. On a multi-core machine, setting `OMP_NUM_THREADS` / `TORCH_NUM_THREADS` can make it more responsive.
+Segmentation runs on the CPU unless you installed a CUDA build of PyTorch and have an NVIDIA GPU. On the CPU it can take a while on large scans.
 
 ---
 
@@ -210,7 +194,8 @@ uow_fire_apps/
 │   ├── prediction_app_explainer.Rmd     # walkthrough of the prediction method
 │   └── stan_models/prediction_lookup.rds
 ├── app-sam-fire/
-│   └── app.R
+│   ├── app.R
+│   └── install_sam_app.Rmd              # installs everything the app needs
 └── uow_fire_apps.Rproj
 ```
 

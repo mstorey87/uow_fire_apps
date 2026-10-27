@@ -8,19 +8,6 @@
 
 options(shiny.maxRequestSize = 500*1024^2)
 
-# Sys.setenv(TMPDIR = "/srv/tmp")
-# Sys.setenv(TEMP = "/srv/tmp")
-# Sys.setenv(TEMPDIR = "/srv/tmp")
-# terraOptions(tempdir="/srv/tmp")
-# 
-# reticulate::py_run_string("
-# import os
-# os.environ['TMPDIR'] = '/srv/tmp'
-# os.environ['TEMP'] = '/srv/tmp'
-# os.environ['TMP']  = '/srv/tmp'
-# ")
-
-
 library(shiny)
 library(leaflet)
 library(leaflet.extras)
