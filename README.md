@@ -12,7 +12,7 @@ A collection of [R Shiny](https://shiny.posit.co/) apps for mapping and analysin
 |---|---|---|---|
 | [`app-sam-fire`](app-sam-fire) | Semi-automated fire perimeter mapping from line scans using SAM2 image segmentation | 3-band GeoTIFF line scans | Fire perimeter polygons (GeoPackage) |
 | [`app-measure-spread`](app-measure-spread) | Measures spread lines and rates of spread between timed fire perimeters | Timestamped perimeter polygons (GeoPackage or zipped shapefile) | Spread lines with distance, time step and ROS (GeoPackage) |
-| [`app-predict-spread`](app-predict-spread) | Predicts ROS from a Bayesian quantile model and compares it with McArthur Mk5 and Vesta Mk2 | Weather, soil moisture, atmospheric stability and fuel inputs (sliders) | ROS estimates with uncertainty, plots and spread ellipses on a map |
+| [`app-predict-spread`](app-predict-spread) | Predicts ROS from a Bayesian quantile model and compares it with McArthur Mk5 and Vesta Mk2 | Weather, soil moisture, atmospheric stability and fuel inputs (sliders) | ROS estimates with uncertainty, plots and spread ellipses on a map | This is a work in progress |
 
 ---
 
