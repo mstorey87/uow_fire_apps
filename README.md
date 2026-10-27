@@ -1,5 +1,6 @@
 # UOW Fire Apps
 
+
 A collection of [R Shiny](https://shiny.posit.co/) apps for mapping and analysing bushfire spread, developed at the University of Wollongong. The apps cover three aspects of rate of spread analysis:
 
 1. **Map** fire perimeters from airborne line scan imagery (`app-sam-fire`)
