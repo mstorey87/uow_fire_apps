@@ -3,7 +3,7 @@ title: "Install everything needed for the SAM fire mapping app"
 output: html_document
 ---
 
-This document installs the R packages, Python, the Python packages (PyTorch and SAM2) and the SAM2 model weights needed to run `app-sam-fire`.
+This document installs the R packages, the Python packages (PyTorch and SAM2) and the SAM2 model weights needed to run `app-sam-fire`. You need to have python installed and know paste the path in below. Its best not to install the most recent python version because some python packages need a slightly older version (e.g. PyTorch).
 
 **How to use it:** open this file in RStudio, check the settings in the first chunk, then click **Run All** (Ctrl+Alt+R) or **Knit**. It takes 10–30 minutes the first time, mostly downloading PyTorch and the model weights.
 
@@ -18,10 +18,10 @@ Change these if needed. The defaults work for most people.
 #   Windows: "C:/Users/me/AppData/Local/Programs/Python/Python311/python.exe"
 #   Mac/Linux: "/usr/bin/python3"
 # Leave as NULL to find an installed Python automatically (section 3 explains what to do if none is found).
-python_path <- NULL
+python_path <- "C:\\Users\\mstorey\\AppData\\Local\\Programs\\Python\\Python314\\python.exe"
 
 # Name of the Python virtual environment to create for SAM2.
-envname <- "sam2_env_testa3"
+envname <- "sam2_env_testa6"
 
 # PyTorch build:
 #   "cpu"   - works on any computer (slower segmentation)
@@ -75,7 +75,9 @@ if (length(still_missing) > 0) {
 
 # 3. Python
 
-Uses `python_path` if you set one. Otherwise it looks for an installed Python 3.10–3.12. SAM2 needs Python 3.10 or newer, and PyTorch may not yet support the very newest Python release.
+Uses `python_path` if you set one. Otherwise it looks for an installed Python 3.10–3.12. SAM2 needs Python 3.10 or newer.
+
+> **Note:** avoid the newest Python release. PyTorch, OpenCV and other packages often take a few months to support a new Python version, so the install can fail with errors like "no matching distribution found for torch". If that happens, install an older Python (3.11 or 3.12 are safe choices) and use that instead.
 
 If none is found, install Python yourself:
 
@@ -205,8 +207,8 @@ chkp_dir <- "%s"
 ))
 ```
 
-Then start the app:
+Then start the app with the command printed below. It uses the full path to the app folder (the folder this file is in), so it works whatever R's working directory is. You can also open `app.R` in RStudio and click **Run App**.
 
-```r
-shiny::runApp("app-sam-fire")
+```{r run-command, echo = FALSE}
+cat(sprintf('shiny::runApp("%s")\n', normalizePath(".", winslash = "/")))
 ```

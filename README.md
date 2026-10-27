@@ -28,7 +28,7 @@ The accuracy and speed could be improved by adopting new versions, using a GPU e
 
 Workflow:
 
-1. **Upload** one or more 3-band GeoTIFF line scans. File names should start with a timestamp in `YYYYmmddHHMMSS` format so the polygon gets the right date and time, although the process should still work if that is not done.
+1. **Upload** one or more 3-band GeoTIFF line scans. File names should start with a timestamp in `YYYYmmddHHMMSS` format so the polygon gets the right date and time, although the process should still work if that is not done - time can be entered manually.
 2. **Preview** the scans on a map. In cases where multiple scans are uploaded to cover a single fire area, drag them to set the merge order (the top scan is on top, and its time and name are used for the polygon). Untick any scans you don't need, then click **Send to mapping tool**.
 3. **Create polygons.** Draw a series of points *or* polygons (not both) over the fire area, then click **Auto-map** to run the sam2 model, which produces the polygon. Refine the result with:
    - **Keep Selected**: keep only the polygons you click on
